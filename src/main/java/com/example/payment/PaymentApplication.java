@@ -15,9 +15,11 @@ import org.hibernate.type.SqlTypes;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
+import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 @SpringBootApplication(exclude = SecurityAutoConfiguration.class)
@@ -49,5 +51,10 @@ class Payment {
     @Column(name = "payer", nullable = false, columnDefinition = "VARCHAR(100)")
     private String payerName;
 }
+
+interface PaymentRepository extends JpaRepository<Payment, UUID>{
+    Optional<Payment> findByPaymentNumber(Integer paymentNumber);
+}
+
 
 
