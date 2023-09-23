@@ -62,4 +62,40 @@ class PaymentControllerTest extends PaymentTest{
         assertThat(getResponse.getBody().size()).isEqualTo(2);
     }
 
+    @Test
+    void shouldGetAllByPayerNameButOnlyOne(){
+        ResponseEntity<Set<PaymentDto>> getResponse = restTemplate
+                .exchange(
+                        String.format("%s/find/name/%s?page=0&size=1", path, paymentList.get(0).getPayerName()),
+                        HttpMethod.GET,
+                        null,
+                        new ParameterizedTypeReference<Set<PaymentDto>>() {});
+        assertThat(getResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(getResponse.getBody().size()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldGetUnprocessableEntityWithInvalidDto(){
+        ResponseEntity<Void> getPost = restTemplate
+                .postForEntity(path, invalidDtoId, Void.class);
+
+        assertThat(getPost.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        ResponseEntity<Void> getPost2 = restTemplate
+                .postForEntity(path, invalidDtoNumber, Void.class);
+
+        assertThat(getPost2.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        ResponseEntity<Void> getPost3 = restTemplate
+                .postForEntity(path, invalidDtoAmount, Void.class);
+
+        assertThat(getPost3.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        ResponseEntity<Void> getPost4 = restTemplate
+                .postForEntity(path, invalidDtoPayerName, Void.class);
+
+        assertThat(getPost4.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        ResponseEntity<Void> getPost5 = restTemplate
+                .postForEntity(path, invalidDtoTimeStamp, Void.class);
+
+        assertThat(getPost5.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+
+    }
 }

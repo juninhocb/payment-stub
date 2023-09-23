@@ -26,6 +26,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -238,17 +239,22 @@ class GlobalExceptionHandler{
     }
 
     @ExceptionHandler(ResourceNotFoundException.class)
-    public ResponseEntity<Void> handleResourceNotFound(ResourceNotFoundException ex, HttpServletRequest hsr){
+    public ResponseEntity<Void> handleResourceNotFound(ResourceNotFoundException ex){
         log.warn("Not successfully query from client " + ex.getMessage()); //intern
         return ResponseEntity.notFound().build();
     }
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorStdMessage> handleResourceNotFound(MethodArgumentNotValidException ex, HttpServletRequest hsr){
+        return ResponseEntity.unprocessableEntity().body(getMessageErr(ex, hsr, HttpStatus.UNPROCESSABLE_ENTITY.value()));
+    }
+
 
     private ErrorStdMessage getMessageErr(Exception ex, HttpServletRequest hsr, Integer code){
 
         return ErrorStdMessage
                 .builder()
                 .message(ex.getMessage())
-                .timestamp(Instant.now())
+                .timestamp(LocalDateTime.now())
                 .statusCode(code)
                 .path(hsr.getRequestURI())
                 .build();
@@ -263,7 +269,7 @@ record ErrorStdMessage(
         @JsonProperty("code")
         Integer statusCode,
         @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
-        Instant timestamp
+        LocalDateTime timestamp
 ){ }
 
 
