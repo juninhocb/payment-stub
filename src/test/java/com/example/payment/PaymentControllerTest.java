@@ -1,5 +1,6 @@
 package com.example.payment;
 
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -15,7 +16,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@ActiveProfiles("test")
+@ActiveProfiles({"test", "redis"})
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class PaymentControllerTest extends PaymentTest{
 
@@ -98,4 +99,29 @@ class PaymentControllerTest extends PaymentTest{
         assertThat(getPost5.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
 
     }
+
+    @Test
+    @RepeatedTest(10)
+    void shouldSeeCachedValuesOnFindByNumber() {
+        ResponseEntity<PaymentDto> getResponse = restTemplate
+                .getForEntity(
+                        String.format("%s/find?number=%d", path, paymentList.get(1).getPaymentNumber()),
+                        PaymentDto.class);
+        assertThat(getResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+    }
+
+    @Test
+    @RepeatedTest(10)
+    void shouldSeeCachedValuesInSetOfPayments(){
+        ResponseEntity<Set<PaymentDto>> getResponse = restTemplate
+                .exchange(
+                        String.format("%s/find/name/%s?page=0&size=10", path, paymentList.get(0).getPayerName()),
+                        HttpMethod.GET,
+                        null,
+                        new ParameterizedTypeReference<Set<PaymentDto>>() {});
+
+        assertThat(getResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
 }
