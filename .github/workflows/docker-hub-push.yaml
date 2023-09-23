@@ -16,6 +16,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
 
+      - name: Build Spring Boot JAR
+        run: |
+          ./mvnw clean package -DskipTests
+
       - name: Build Docker image
         run: |
           docker buildx create --use

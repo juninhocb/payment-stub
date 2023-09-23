@@ -2,7 +2,7 @@ FROM openjdk:17
 
 WORKDIR /app
 
-COPY payment-0.0.1-SNAPSHOT.jar /app/payment.jar
+COPY target/payment-0.0.1-SNAPSHOT.jar /app/payment.jar
 
 EXPOSE 8080
 
