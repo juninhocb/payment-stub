@@ -21,15 +21,15 @@ import org.mapstruct.MappingConstants;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
-import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.annotation.EnableCaching;
-import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.redis.cache.RedisCacheConfiguration;
+import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
@@ -41,6 +41,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.io.Serializable;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Duration;
@@ -105,7 +106,9 @@ record PaymentDto(
         @JsonProperty("payer_name")
         String payerName
 
-) { }
+) implements Serializable {
+    static long serialVersionUid = 1L;
+}
 
 @Mapper(componentModel = MappingConstants.ComponentModel.SPRING)
 interface PaymentMapper {
@@ -148,8 +151,9 @@ class PaymentServiceImpl implements PaymentService {
     }
 
     @Override
-    @Cacheable(key = "payerName")
+    @Cacheable(key = "#payerName + '_' + #pageable", cacheNames = "payments")
     public Set<PaymentDto> getAllPaymentByPayer(Pageable pageable, String payerName) {
+
         return paymentRepository
                 .findAllByPayerName(payerName, pageable)
                 .stream()
@@ -206,7 +210,6 @@ class PaymentController {
     public ResponseEntity<PaymentDto> getById(@PathVariable UUID id){
         PaymentDto cached = getFromRedis(id.toString());
         if (cached != null){
-            System.out.println("Cached value");
             return new ResponseEntity<>(cached, HttpStatus.OK);
         }
         PaymentDto fromDb = paymentService
@@ -219,7 +222,6 @@ class PaymentController {
             @RequestParam("number") Integer paymentNumber){
         PaymentDto cached = getFromRedis(paymentNumber.toString());
         if (cached != null){
-            System.out.println("Cached value");
             return new ResponseEntity<>(cached, HttpStatus.OK);
         }
         PaymentDto fromDb = paymentService
@@ -236,11 +238,9 @@ class PaymentController {
                                 pageable.getPageSize())), HttpStatus.OK);
     }
     @GetMapping("/find/name/{payer_name}")
-    //@Cacheable(key = "#payerName", cacheNames = "payments")
     public ResponseEntity<Set<PaymentDto>> getAllByPayerName(
             @PathVariable("payer_name") String payerName,
             Pageable pageable){
-        System.out.println("Query database.");
         return new ResponseEntity<>(
                 paymentService
                         .getAllPaymentByPayer(
@@ -320,24 +320,36 @@ record ErrorStdMessage(
 class RedisConfig {
 
     private final ObjectMapper objectMapper;
+    private final RedisConnectionFactory connectionFactory;
     @Bean
-    public CacheManager cacheManager() {
-        return new ConcurrentMapCacheManager("payments");
+    public RedisCacheManager cacheManager() {
+        RedisCacheConfiguration config = RedisCacheConfiguration
+                .defaultCacheConfig()
+                .entryTtl(Duration.ofMinutes(3))
+                .disableCachingNullValues();
+
+        return RedisCacheManager
+                .builder(connectionFactory)
+                .withCacheConfiguration("payments", config)
+                .build();
     }
+
     @Bean
-    public RedisTemplate<String, PaymentDto> redisTemplate(RedisConnectionFactory factory) {
+    public RedisTemplate<String, PaymentDto> redisTemplate() {
 
         RedisTemplate<String, PaymentDto> template = new RedisTemplate<String, PaymentDto>();
 
-        template.setConnectionFactory(factory);
+        template.setConnectionFactory(connectionFactory);
         template.setKeySerializer(new StringRedisSerializer());
-
-        Jackson2JsonRedisSerializer jsonSerializer =
-                new Jackson2JsonRedisSerializer(objectMapper, PaymentDto.class);
-        template.setValueSerializer(jsonSerializer);
+        template.setValueSerializer(jsonRedisSerializer());
 
         return template;
     }
+
+    private Jackson2JsonRedisSerializer jsonRedisSerializer(){
+        return new Jackson2JsonRedisSerializer(objectMapper, PaymentDto.class);
+    }
+
 }
 
 
