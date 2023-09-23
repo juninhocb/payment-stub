@@ -1,0 +1,9 @@
+###
+POST http://localhost:8080/api/v1/payment
+Content-Type: application/json
+
+{
+  "payer_name": "John Green",
+  "amount": 12.4
+}
+

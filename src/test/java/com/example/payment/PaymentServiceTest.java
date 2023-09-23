@@ -6,7 +6,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ActiveProfiles;
 
-import java.math.BigDecimal;
 import java.util.Set;
 import java.util.UUID;
 
@@ -24,11 +23,6 @@ class PaymentServiceTest extends PaymentTest {
     @Test
     void getPaymentByIdAfterCreate() {
 
-        PaymentDto dto = PaymentDto
-                .builder()
-                .amount(new BigDecimal("4.5"))
-                .payerName("John Green")
-                .build();
         UUID resourceId = paymentService.createPayment(dto);
 
         assertThat(paymentService.getPaymentById(resourceId)).isNotNull();

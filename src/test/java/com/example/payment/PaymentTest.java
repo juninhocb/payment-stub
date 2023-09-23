@@ -14,9 +14,21 @@ public abstract class PaymentTest {
     PaymentRepository repository;
     boolean enableAutoCreate = false;
 
+    final PaymentDto dto;
+
+    public PaymentTest(){
+
+        dto = PaymentDto
+                .builder()
+                .amount(new BigDecimal("4.5"))
+                .payerName("John Green")
+                .build();
+    }
+
     List<Payment> paymentList;
     @BeforeEach
     void setUp() {
+
         Payment payment1 = Payment
                 .builder()
                 .amount(new BigDecimal("2.6"))

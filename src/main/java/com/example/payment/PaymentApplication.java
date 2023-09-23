@@ -1,12 +1,16 @@
 package com.example.payment;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import lombok.*;
+import lombok.extern.slf4j.Slf4j;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.GenericGenerator;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -16,11 +20,17 @@ import org.mapstruct.MappingConstants;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.math.BigDecimal;
+import java.net.URI;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -166,6 +176,95 @@ class AppUtils {
     }
 
 }
+
+@RestController
+@RequestMapping("/api/v1/payment")
+@RequiredArgsConstructor
+class PaymentController {
+    private final PaymentService paymentService;
+    @GetMapping("/find/id/{id}")
+    public ResponseEntity<PaymentDto> getById(@PathVariable UUID id){
+        return new ResponseEntity<>(paymentService
+                .getPaymentById(id), HttpStatus.OK);
+    }
+    @GetMapping("/find")
+    public ResponseEntity<PaymentDto> getByPaymentNumber(
+            @RequestParam("number") Integer paymentNumber){
+        return new ResponseEntity<>(paymentService
+                .getPaymentByPaymentNumber(paymentNumber), HttpStatus.OK);
+    }
+    @GetMapping
+    public ResponseEntity<Set<PaymentDto>> getAllPayments(Pageable pageable){
+        return new ResponseEntity<>(
+                paymentService
+                        .getAllPayments(
+                                PageRequest.of(pageable.getPageNumber(),
+                                pageable.getPageSize())), HttpStatus.OK);
+    }
+    @GetMapping("/find/name/{payer_name}")
+    public ResponseEntity<Set<PaymentDto>> getAllByPayerName(
+            @PathVariable("payer_name") String payerName,
+            Pageable pageable){
+        return new ResponseEntity<>(
+                paymentService
+                        .getAllPaymentByPayer(
+                                PageRequest.of(pageable.getPageNumber(),
+                                pageable.getPageSize()), payerName),
+                                    HttpStatus.OK);
+    }
+    @PostMapping
+    public ResponseEntity<Void> createPayment(
+            @RequestBody @Valid PaymentDto paymentDto,
+            UriComponentsBuilder ucb){
+
+        UUID persistedId = paymentService.createPayment(paymentDto);
+
+        URI resourcePath = ucb
+                .path("/api/v1/payment/find/id/{id}")
+                .buildAndExpand(persistedId)
+                .toUri();
+
+        return ResponseEntity.created(resourcePath).build();
+    }
+}
+
+@ControllerAdvice
+@Slf4j
+class GlobalExceptionHandler{
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorStdMessage> handleGenericException(Exception ex, HttpServletRequest hsr){
+        log.error("Error message " + ex.getMessage() + " Class " + ex.getClass());
+        return ResponseEntity.internalServerError().body(getMessageErr(ex, hsr, HttpStatus.INTERNAL_SERVER_ERROR.value()));
+    }
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<Void> handleResourceNotFound(ResourceNotFoundException ex, HttpServletRequest hsr){
+        log.warn("Not successfully query from client " + ex.getMessage()); //intern
+        return ResponseEntity.notFound().build();
+    }
+
+    private ErrorStdMessage getMessageErr(Exception ex, HttpServletRequest hsr, Integer code){
+
+        return ErrorStdMessage
+                .builder()
+                .message(ex.getMessage())
+                .timestamp(Instant.now())
+                .statusCode(code)
+                .path(hsr.getRequestURI())
+                .build();
+    }
+
+}
+
+@Builder
+record ErrorStdMessage(
+        String message,
+        String path,
+        @JsonProperty("code")
+        Integer statusCode,
+        @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'")
+        Instant timestamp
+){ }
 
 
 
