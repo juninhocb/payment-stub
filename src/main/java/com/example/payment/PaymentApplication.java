@@ -3,10 +3,7 @@ package com.example.payment;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.Id;
+import jakarta.persistence.*;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
@@ -36,10 +33,28 @@ import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.statemachine.StateContext;
+import org.springframework.statemachine.StateMachine;
+import org.springframework.statemachine.action.Action;
+import org.springframework.statemachine.config.EnableStateMachineFactory;
+import org.springframework.statemachine.config.EnumStateMachineConfigurerAdapter;
+import org.springframework.statemachine.config.StateMachineFactory;
+import org.springframework.statemachine.config.builders.StateMachineConfigurationConfigurer;
+import org.springframework.statemachine.config.builders.StateMachineStateConfigurer;
+import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
+import org.springframework.statemachine.listener.StateMachineListener;
+import org.springframework.statemachine.listener.StateMachineListenerAdapter;
+import org.springframework.statemachine.state.State;
+import org.springframework.statemachine.support.DefaultStateMachineContext;
+import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
@@ -79,6 +94,9 @@ class Payment {
     private Instant timestamp;
     @Column(name = "payer", nullable = false, columnDefinition = "VARCHAR(100)")
     private String payerName;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_state")
+    private States paymentState;
 }
 
 interface PaymentRepository extends JpaRepository<Payment, UUID>{
@@ -104,7 +122,8 @@ record PaymentDto(
         @NotBlank(message = "Payer name must be not null and not blank")
         @Pattern(regexp = "^[a-zA-ZÀ-ÖØ-öø-ÿ\s]+$", message = "Payer name must contian only letters")
         @JsonProperty("payer_name")
-        String payerName
+        String payerName,
+        @Null States state
 
 ) implements Serializable {
     static long serialVersionUid = 1L;
@@ -122,6 +141,7 @@ interface PaymentService {
     Set<PaymentDto> getAllPayments(Pageable pageable);
     Set<PaymentDto> getAllPaymentByPayer(Pageable pageable, String payerName);
     UUID createPayment(PaymentDto paymentDto);
+    void initPaymentProcessor(Payment payment);
 }
 
 @Service
@@ -130,6 +150,7 @@ class PaymentServiceImpl implements PaymentService {
 
     private final PaymentRepository paymentRepository;
     private final PaymentMapper paymentMapper;
+    private final StateMachineFactory<States, Events> stateMachineFactory;
 
     @Override
     public PaymentDto getPaymentById(UUID id) {
@@ -150,6 +171,8 @@ class PaymentServiceImpl implements PaymentService {
                 .collect(Collectors.toSet());
     }
 
+
+
     @Override
     @Cacheable(key = "#payerName + '_' + #pageable", cacheNames = "payments")
     public Set<PaymentDto> getAllPaymentByPayer(Pageable pageable, String payerName) {
@@ -163,9 +186,66 @@ class PaymentServiceImpl implements PaymentService {
 
     @Override
     public UUID createPayment(PaymentDto paymentDto) {
+        Integer paymentNumber = AppUtils.generatePaymentNumber();
         Payment paymentToPersist = paymentMapper.dtoToEntity(paymentDto);
-        paymentToPersist.setPaymentNumber(AppUtils.generatePaymentNumber());
-        return paymentRepository.save(paymentToPersist).getId();
+        paymentToPersist.setPaymentNumber(paymentNumber);
+        paymentToPersist.setPaymentState(States.NEW);
+        Payment persisted = paymentRepository.save(paymentToPersist);
+        initPaymentProcessor(persisted);
+        return persisted.getId();
+    }
+
+    @Override
+    public void initPaymentProcessor(Payment payment) {
+        StateMachine<States, Events> sm = getFirstStateMachine(payment);
+        sm
+            .startReactively()
+            .publishOn(Schedulers.boundedElastic())
+            .doFirst(() -> {
+                sm.sendEvent(getMonoMessage(Events.PRE_AUTHORIZE, payment.getPaymentNumber())).subscribe();
+            }).subscribe();
+    }
+
+
+    private Mono<Message<Events>> getMonoMessage(Events event, Integer paymentNumber){
+        Message<Events> msg = MessageBuilder
+                .withPayload(event)
+                .setHeader("paymentNumber", paymentNumber)
+                .build();
+        return Mono.just(msg);
+
+    }
+
+    private StateMachine<States, Events> getFirstStateMachine(Payment payment){
+
+        StateMachine<States, Events> sm = stateMachineFactory
+                .getStateMachine(payment.getId());
+
+        DefaultStateMachineContext<States, Events> dsmc =
+                new DefaultStateMachineContext<>(States.NEW, null, null, null);
+
+        sm.getStateMachineAccessor().doWithAllRegions(sma -> {
+            sma.resetStateMachineReactively(dsmc).subscribe();
+        });
+
+        return sm;
+    }
+
+    private StateMachine<States, Events> getStateMachine(PaymentDto paymentDto){
+
+        StateMachine<States, Events> sm = stateMachineFactory
+                .getStateMachine(paymentDto.id());
+
+        sm.stopReactively().subscribe();
+
+        DefaultStateMachineContext<States, Events> dsmc =
+                new DefaultStateMachineContext<>(paymentDto.state(), null, null, null);
+
+        sm.getStateMachineAccessor().doWithAllRegions(sma -> {
+            sma.resetStateMachineReactively(dsmc).subscribe();
+        });
+
+        return sm;
     }
 
     private Payment handleGetById(Object key){
@@ -290,7 +370,6 @@ class GlobalExceptionHandler{
         return ResponseEntity.unprocessableEntity().body(getMessageErr(ex, hsr, HttpStatus.UNPROCESSABLE_ENTITY.value()));
     }
 
-
     private ErrorStdMessage getMessageErr(Exception ex, HttpServletRequest hsr, Integer code){
 
         return ErrorStdMessage
@@ -352,6 +431,104 @@ class RedisConfig {
 
 }
 
+enum States {
+    NEW, PRE_AUTH, PRE_AUTH_ERROR, AUTH, AUTH_ERROR, AUTH_AUTHORIZED
+}
+
+enum Events{
+    PRE_AUTHORIZE, PRE_AUTH_APPROVED, PRE_AUTH_DECLINED, AUTH_APPROVED, AUTH_DECLINED
+}
+
+
+@Configuration
+@EnableStateMachineFactory
+@RequiredArgsConstructor
+class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Events> {
+    private final PreAuthAction preAuthAction;
+    @Override
+    public void configure(StateMachineConfigurationConfigurer<States, Events> config) throws Exception {
+        config
+                .withConfiguration()
+                .autoStartup(false)
+                .listener(listener());
+    }
+
+    @Override
+    public void configure(StateMachineStateConfigurer<States, Events> states) throws Exception {
+        states
+                .withStates()
+                .initial(States.NEW)
+                .states(EnumSet.allOf(States.class))
+                .end(States.PRE_AUTH_ERROR)
+                .end(States.AUTH_ERROR)
+                .end(States.AUTH_AUTHORIZED);
+    }
+
+    @Override
+    public void configure(StateMachineTransitionConfigurer<States, Events> transitions) throws Exception {
+        transitions
+                .withExternal()
+                .source(States.NEW)
+                .target(States.PRE_AUTH)
+                .event(Events.PRE_AUTHORIZE)
+                .action(preAuthAction)
+                    .and()
+                    .withExternal()
+                    .source(States.PRE_AUTH)
+                    .target(States.AUTH)
+                    .event(Events.PRE_AUTH_APPROVED)
+                    .and()
+                    .withExternal()
+                    .source(States.PRE_AUTH)
+                    .target(States.PRE_AUTH_ERROR)
+                    .event(Events.PRE_AUTH_DECLINED)
+                        .and()
+                        .withExternal()
+                        .source(States.AUTH)
+                        .target(States.AUTH_AUTHORIZED)
+                        .event(Events.AUTH_APPROVED)
+                        .and()
+                        .withExternal()
+                        .source(States.AUTH)
+                        .target(States.AUTH_ERROR)
+                        .event(Events.AUTH_DECLINED);
+    }
+
+    @Bean
+    public StateMachineListener<States, Events> listener() {
+        return new StateMachineListenerAdapter<States, Events>() {
+            @Override
+            public void stateChanged(State<States, Events> from, State<States, Events> to) {
+                System.out.println("State change from " + from.getId() + " to " + to.getId());
+            }
+        };
+    }
+}
+@Component
+@RequiredArgsConstructor
+class PreAuthAction implements Action<States, Events> {
+
+    private final PaymentRepository paymentRepository;
+
+    @Override
+    public void execute(StateContext<States, Events> stateContext) {
+
+        Integer paymentNumber = (Integer) stateContext.getMessage().getHeaders().get("paymentNumber");
+
+        Optional<Payment> paymentOpt = paymentRepository.findByPaymentNumber(paymentNumber);
+
+        if (paymentOpt.isEmpty()){
+            throw new ResourceNotFoundException(paymentNumber.toString());
+        }
+
+        Payment updatePersist =  paymentOpt.get();
+
+        updatePersist.setPaymentState(stateContext.getTarget().getId());
+
+        paymentRepository.save(updatePersist);
+
+    }
+}
 
 
 
