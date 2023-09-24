@@ -2,6 +2,7 @@ package com.example.payment;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.*;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,6 +16,11 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 import org.mapstruct.Mapper;
 import org.mapstruct.MappingConstants;
+import org.springframework.amqp.core.*;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.support.converter.MessageConversionException;
+import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
@@ -44,6 +50,7 @@ import org.springframework.statemachine.config.StateMachineFactory;
 import org.springframework.statemachine.config.builders.StateMachineConfigurationConfigurer;
 import org.springframework.statemachine.config.builders.StateMachineStateConfigurer;
 import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
+import org.springframework.statemachine.guard.Guard;
 import org.springframework.statemachine.listener.StateMachineListener;
 import org.springframework.statemachine.listener.StateMachineListenerAdapter;
 import org.springframework.statemachine.state.State;
@@ -55,6 +62,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+
 
 import java.io.Serializable;
 import java.math.BigDecimal;
@@ -210,7 +218,7 @@ class PaymentServiceImpl implements PaymentService {
     private Mono<Message<Events>> getMonoMessage(Events event, Integer paymentNumber){
         Message<Events> msg = MessageBuilder
                 .withPayload(event)
-                .setHeader("paymentNumber", paymentNumber)
+                .setHeader(StateMachineConfig.PAYMENT_HEADER, paymentNumber)
                 .build();
         return Mono.just(msg);
 
@@ -444,7 +452,9 @@ enum Events{
 @EnableStateMachineFactory
 @RequiredArgsConstructor
 class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Events> {
+    public static final String PAYMENT_HEADER = "paymentNumber";
     private final PreAuthAction preAuthAction;
+    private final PaymentGuard paymentGuard;
     @Override
     public void configure(StateMachineConfigurationConfigurer<States, Events> config) throws Exception {
         config
@@ -472,6 +482,7 @@ class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Event
                 .target(States.PRE_AUTH)
                 .event(Events.PRE_AUTHORIZE)
                 .action(preAuthAction)
+                .guard(paymentGuard)
                     .and()
                     .withExternal()
                     .source(States.PRE_AUTH)
@@ -509,11 +520,13 @@ class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Event
 class PreAuthAction implements Action<States, Events> {
 
     private final PaymentRepository paymentRepository;
+    private final RabbitTemplate rabbitTemplate;
+    private final PaymentMapper paymentMapper;
 
     @Override
     public void execute(StateContext<States, Events> stateContext) {
 
-        Integer paymentNumber = (Integer) stateContext.getMessage().getHeaders().get("paymentNumber");
+        Integer paymentNumber = (Integer) stateContext.getMessage().getHeaders().get(StateMachineConfig.PAYMENT_HEADER);
 
         Optional<Payment> paymentOpt = paymentRepository.findByPaymentNumber(paymentNumber);
 
@@ -525,10 +538,102 @@ class PreAuthAction implements Action<States, Events> {
 
         updatePersist.setPaymentState(stateContext.getTarget().getId());
 
-        paymentRepository.save(updatePersist);
+        try {
+
+            PreAuthorizeMessageRequest request = PreAuthorizeMessageRequest
+                    .builder()
+                            .requestId(UUID.randomUUID())
+                            .paymentDto(paymentMapper.entityToDto(updatePersist))
+                            .timestamp(Instant.now()).build();
+
+            rabbitTemplate.convertAndSend(RabbitConfig.EXCHANGE_PRE_AUTH_TOPIC, "payment.stub.pre.auth.key", request);
+
+            paymentRepository.save(updatePersist);
+
+        } catch (Exception ex){
+            throw new RuntimeException("Message not processed "  + updatePersist.getPaymentNumber() + " Err " + ex.getMessage());
+
+        }
 
     }
 }
 
+@Component
+class PaymentGuard implements Guard<States, Events> {
+    @Override
+    public boolean evaluate(StateContext<States, Events> stateContext) {
+        return stateContext.getMessageHeader(StateMachineConfig.PAYMENT_HEADER) != null;
+    }
+}
+
+@Configuration
+class RabbitConfig{
+    public static final String PAYMENT_PRE_AUTHORIZE = "pre_authorize";
+    public static final String PAYMENT_AUTHORIZE = "authorize";
+    public static final String EXCHANGE_PRE_AUTH_TOPIC = "pre_auth_exchange";
+    public static final String EXCHANGE_AUTH_TOPIC = "auth_exchange";
+
+    //sender
+    @Bean
+    public Queue queuePreAuth(){
+        return new Queue(PAYMENT_PRE_AUTHORIZE, false);
+    }
+    @Bean
+    public TopicExchange exchangePreAuth(){
+        return new TopicExchange(EXCHANGE_PRE_AUTH_TOPIC);
+    }
+    @Bean
+    public Binding bindingPreAuth(){
+        return BindingBuilder
+                .bind(queuePreAuth())
+                .to(exchangePreAuth())
+                .with("payment.stub.pre.auth.#");
+    }
+    @Bean
+    public Queue queueAuth(){
+        return new Queue(PAYMENT_AUTHORIZE, false);
+    }
+    @Bean
+    public TopicExchange exchangeAuth(){
+        return new TopicExchange(EXCHANGE_AUTH_TOPIC);
+    }
+    @Bean
+    public Binding bindingAuth(){
+        return BindingBuilder
+                .bind(queueAuth())
+                .to(exchangeAuth())
+                .with("payment.stub.auth.#");
+    }
+
+}
+
+@Configuration
+@RequiredArgsConstructor
+class JsonConverterForMessageQueue implements MessageConverter {
+
+    private final ObjectMapper objectMapper;
+    @Override
+    public org.springframework.amqp.core.Message toMessage(Object o, MessageProperties messageProperties) throws MessageConversionException {
+        try {
+            String json = objectMapper.writeValueAsString(o);
+            messageProperties.setContentType("application/json");
+            return new org.springframework.amqp.core.Message(json.getBytes(), messageProperties);
+        } catch (JsonProcessingException e) {
+            throw new MessageConversionException("Error converting object to JSON", e);
+        }
+
+    }
+    @Override
+    public Object fromMessage(org.springframework.amqp.core.Message message) throws MessageConversionException {
+        return null;
+    }
+}
+
+@Builder
+record PreAuthorizeMessageRequest(
+        @JsonProperty("request_id") UUID requestId,
+        @JsonProperty("payment") PaymentDto paymentDto,
+        Instant timestamp
+) { }
 
 
