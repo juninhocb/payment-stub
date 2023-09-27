@@ -457,6 +457,7 @@ enum Events{
 class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Events> {
     public static final String PAYMENT_HEADER = "paymentNumber";
     private final PreAuthAction preAuthAction;
+    private final AuthAction authAction;
     private final PaymentGuard paymentGuard;
     @Override
     public void configure(StateMachineConfigurationConfigurer<States, Events> config) throws Exception {
@@ -491,11 +492,15 @@ class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Event
                     .source(States.PRE_AUTH)
                     .target(States.AUTH)
                     .event(Events.PRE_AUTH_APPROVED)
+                    .action(authAction)
+                    .guard(paymentGuard)
                     .and()
                     .withExternal()
                     .source(States.PRE_AUTH)
                     .target(States.PRE_AUTH_ERROR)
                     .event(Events.PRE_AUTH_DECLINED)
+                    .action(authAction)
+                    .guard(paymentGuard)
                         .and()
                         .withExternal()
                         .source(States.AUTH)
@@ -518,6 +523,29 @@ class StateMachineConfig extends EnumStateMachineConfigurerAdapter<States, Event
         };
     }
 }
+
+@Component
+@RequiredArgsConstructor
+class AuthAction implements Action<States, Events> {
+
+    private final PaymentRepository paymentRepository;
+    @Override
+    public void execute(StateContext<States, Events> stateContext) {
+        Integer paymentNumber = (Integer) stateContext.getMessage().getHeaders().get(StateMachineConfig.PAYMENT_HEADER);
+
+        Optional<Payment> paymentOpt = paymentRepository.findByPaymentNumber(paymentNumber);
+
+        if (paymentOpt.isEmpty()){
+            throw new ResourceNotFoundException(paymentNumber.toString());
+        }
+
+        Payment updatePersist =  paymentOpt.get();
+
+        updatePersist.setPaymentState(stateContext.getTarget().getId());
+        paymentRepository.save(updatePersist);
+    }
+}
+
 @Component
 @RequiredArgsConstructor
 class PreAuthAction implements Action<States, Events> {
